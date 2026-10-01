@@ -56,7 +56,7 @@ refresh_lock = Lock()
 
 # Do not call Open-Meteo more often than this while the current
 # Render instance is alive.
-AUTO_REFRESH_MINUTES = 60
+AUTO_REFRESH_MINUTES = 30
 
 
 # ============================================================
