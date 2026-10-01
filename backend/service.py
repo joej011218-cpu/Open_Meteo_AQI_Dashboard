@@ -17,11 +17,9 @@ def refresh_openmeteo_and_aqi(
     past_days=30,
 ):
     """
-    Fetch recent Open-Meteo CAMS data, store/update it in SQLite,
-    calculate CPCB-style AQI and save the AQI values.
-
-    The database is intentionally rebuildable because Render's local
-    filesystem is not persistent across all restarts/redeploys.
+    Fetch recent Open-Meteo CAMS data, store the pollutant values,
+    calculate CPCB-style AQI, and store every calculated hourly AQI
+    back into the same air_quality table.
     """
     rows = fetch_recent_hourly(
         past_days=past_days
@@ -32,9 +30,7 @@ def refresh_openmeteo_and_aqi(
             "Open-Meteo returned no hourly rows."
         )
 
-    upsert_air_quality_rows(
-        rows
-    )
+    upsert_air_quality_rows(rows)
 
     db_rows = fetch_air_quality(
         limit=max(
@@ -48,9 +44,7 @@ def refresh_openmeteo_and_aqi(
             "Database is empty after Open-Meteo refresh."
         )
 
-    df = pd.DataFrame(
-        db_rows
-    )
+    df = pd.DataFrame(db_rows)
 
     df["timestamp"] = pd.to_datetime(
         df["timestamp"],
@@ -78,17 +72,12 @@ def refresh_openmeteo_and_aqi(
         .ffill()
     )
 
-    aqi_df = calculate_aqi_dataframe(
-        df
-    )
+    aqi_df = calculate_aqi_dataframe(df)
 
     pairs = []
 
     for _, row in aqi_df.iterrows():
-
-        if pd.isna(
-            row["aqi"]
-        ):
+        if pd.isna(row["aqi"]):
             aqi_value = None
         else:
             aqi_value = float(
@@ -97,16 +86,13 @@ def refresh_openmeteo_and_aqi(
 
         pairs.append(
             (
-                row[
-                    "timestamp"
-                ].isoformat(),
+                row["timestamp"].isoformat(),
                 aqi_value,
             )
         )
 
-    replace_aqi_values(
-        pairs
-    )
+    # This is the step that persists the calculated AQI history.
+    replace_aqi_values(pairs)
 
     latest_row = fetch_latest()
 
@@ -126,30 +112,17 @@ def refresh_openmeteo_and_aqi(
     )
 
     return {
-        "fetched_rows":
-            len(rows),
-
-        "stored_rows_used_for_aqi":
-            len(aqi_df),
-
-        "latest_timestamp":
-            (
-                latest_row[
-                    "timestamp"
-                ]
-                if latest_row
-                else None
-            ),
-
-        "latest_aqi":
-            (
-                latest_row[
-                    "aqi"
-                ]
-                if latest_row
-                else None
-            ),
-
-        "refreshed_at_utc":
-            refresh_time,
+        "fetched_rows": len(rows),
+        "stored_rows_used_for_aqi": len(aqi_df),
+        "latest_timestamp": (
+            latest_row["timestamp"]
+            if latest_row
+            else None
+        ),
+        "latest_aqi": (
+            latest_row["aqi"]
+            if latest_row
+            else None
+        ),
+        "refreshed_at_utc": refresh_time,
     }

@@ -6,7 +6,10 @@ from config import DATA_DIR, DB_PATH
 
 @contextmanager
 def get_connection():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     conn = sqlite3.connect(
         DB_PATH,
@@ -24,7 +27,6 @@ def get_connection():
 
 def init_db():
     with get_connection() as conn:
-
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS air_quality (
@@ -56,9 +58,6 @@ def init_db():
             """
         )
 
-        # Small key/value table used by the self-refreshing Render backend.
-        # This lets us remember the last successful refresh while the current
-        # Render instance is alive.
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS app_state (
@@ -121,7 +120,9 @@ def upsert_air_quality_rows(rows):
     return len(rows)
 
 
-def replace_aqi_values(timestamp_aqi_pairs):
+def replace_aqi_values(
+    timestamp_aqi_pairs
+):
     if not timestamp_aqi_pairs:
         return
 
@@ -166,7 +167,6 @@ def fetch_air_quality(limit=720):
             ),
         ).fetchall()
 
-    # Feature engineering requires chronological order.
     return [
         dict(row)
         for row in reversed(rows)
@@ -209,9 +209,46 @@ def count_air_quality():
             """
         ).fetchone()
 
-    return int(
-        row["n"]
-    )
+    return int(row["n"])
+
+
+def fetch_alert_rows(
+    threshold=201,
+    limit=200,
+):
+    """
+    Alerts are derived from the AQI values already stored in air_quality.
+    No duplicate alerts table is required.
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                timestamp,
+                aqi,
+                pm25,
+                pm10,
+                no2,
+                so2,
+                co,
+                o3,
+                source
+            FROM air_quality
+            WHERE aqi IS NOT NULL
+              AND aqi >= ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (
+                float(threshold),
+                int(limit),
+            ),
+        ).fetchall()
+
+    return [
+        dict(row)
+        for row in rows
+    ]
 
 
 def save_predictions(predictions):
@@ -219,8 +256,6 @@ def save_predictions(predictions):
         return
 
     with get_connection() as conn:
-
-        # Only the newest 1-24 hour forecast is needed by the dashboard.
         conn.execute(
             "DELETE FROM predictions"
         )
@@ -240,31 +275,18 @@ def save_predictions(predictions):
             """,
             [
                 (
-                    prediction[
-                        "generated_at"
-                    ],
-                    prediction[
-                        "forecast_time"
-                    ],
-                    prediction[
-                        "horizon"
-                    ],
-                    prediction[
-                        "current_aqi"
-                    ],
-                    prediction[
-                        "predicted_delta"
-                    ],
-                    prediction[
-                        "predicted_aqi"
-                    ],
-                    prediction.get(
+                    p["generated_at"],
+                    p["forecast_time"],
+                    p["horizon"],
+                    p["current_aqi"],
+                    p["predicted_delta"],
+                    p["predicted_aqi"],
+                    p.get(
                         "model",
                         "XGBoost_DeltaOnly",
                     ),
                 )
-                for prediction
-                in predictions
+                for p in predictions
             ],
         )
 
@@ -293,13 +315,6 @@ def fetch_predictions():
 
 
 def set_state(key, value):
-    """
-    Store a small runtime value.
-
-    Examples:
-        last_refresh_at
-        last_refresh_error
-    """
     with get_connection() as conn:
         conn.execute(
             """
@@ -321,7 +336,10 @@ def set_state(key, value):
         )
 
 
-def get_state(key, default=None):
+def get_state(
+    key,
+    default=None,
+):
     with get_connection() as conn:
         row = conn.execute(
             """
