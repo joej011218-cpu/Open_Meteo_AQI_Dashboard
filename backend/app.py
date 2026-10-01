@@ -20,14 +20,7 @@ from service import refresh_openmeteo_and_aqi
 
 app = Flask(__name__)
 
-CORS(
-    app,
-    resources={
-        r"/api/*": {
-            "origins": CORS_ORIGINS
-        }
-    },
-)
+CORS(app)
 
 init_db()
 
