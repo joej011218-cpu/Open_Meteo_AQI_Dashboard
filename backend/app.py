@@ -1,9 +1,11 @@
+from datetime import datetime, timezone, timedelta
+from threading import Lock
+
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import pandas as pd
 
 from config import (
-    CORS_ORIGINS,
     BOOTSTRAP_PAST_DAYS,
 )
 from database import (
@@ -13,23 +15,59 @@ from database import (
     fetch_predictions,
     save_predictions,
     count_air_quality,
+    get_state,
+    set_state,
 )
 from predictor import XGBoostForecastService
 from service import refresh_openmeteo_and_aqi
 
 
+# ============================================================
+# APP
+# ============================================================
+
 app = Flask(__name__)
 
+# Public read-only AQI dashboard API.
 CORS(app)
 
 init_db()
 
-# Load models once at backend startup.
-forecast_service = XGBoostForecastService()
 
+# ============================================================
+# MODEL SERVICE
+#
+# Load the 24 XGBoost models only once when Gunicorn starts.
+# ============================================================
+
+forecast_service = (
+    XGBoostForecastService()
+)
+
+
+# ============================================================
+# SELF-REFRESH SETTINGS
+# ============================================================
+
+# The frontend may call /api/latest and /api/forecast almost
+# simultaneously. The lock prevents both requests from launching
+# the expensive Open-Meteo + XGBoost refresh at the same time.
+refresh_lock = Lock()
+
+# Do not call Open-Meteo more often than this while the current
+# Render instance is alive.
+AUTO_REFRESH_MINUTES = 60
+
+
+# ============================================================
+# DATAFRAME FOR XGBOOST
+# ============================================================
 
 def build_dataframe_for_prediction():
-    rows = fetch_air_quality(limit=1000)
+
+    rows = fetch_air_quality(
+        limit=1000
+    )
 
     if len(rows) < 200:
         raise RuntimeError(
@@ -37,10 +75,13 @@ def build_dataframe_for_prediction():
             f"Database contains only {len(rows)} rows."
         )
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(
+        rows
+    )
 
     df["timestamp"] = pd.to_datetime(
-        df["timestamp"]
+        df["timestamp"],
+        errors="coerce",
     )
 
     for col in [
@@ -57,97 +98,380 @@ def build_dataframe_for_prediction():
             errors="coerce",
         )
 
-    return (
-        df.sort_values("timestamp")
+    df = (
+        df
+        .sort_values("timestamp")
         .reset_index(drop=True)
     )
 
+    return df
+
+
+# ============================================================
+# CREATE 24-HOUR FORECAST
+# ============================================================
 
 def create_forecast():
-    df = build_dataframe_for_prediction()
+
+    df = (
+        build_dataframe_for_prediction()
+    )
 
     predictions = (
         forecast_service
         .predict_24h(df)
     )
 
-    save_predictions(predictions)
+    save_predictions(
+        predictions
+    )
 
     return predictions
 
 
-@app.get("/api/health")
-def health():
-    return jsonify(
-        {
-            "status": "ok",
-            "database_rows": count_air_quality(),
-            "models_loaded": len(
-                forecast_service.models
-            ),
-            "expected_models": 24,
-        }
+# ============================================================
+# REFRESH HELPERS
+# ============================================================
+
+def parse_utc_datetime(value):
+
+    if not value:
+        return None
+
+    try:
+        parsed = (
+            datetime.fromisoformat(
+                value
+            )
+        )
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(
+                tzinfo=timezone.utc
+            )
+
+        return parsed.astimezone(
+            timezone.utc
+        )
+
+    except Exception:
+        return None
+
+
+def refresh_is_due():
+
+    # If data or predictions disappeared after a Render restart,
+    # immediately rebuild them.
+    if count_air_quality() < 200:
+        return True
+
+    if not fetch_predictions():
+        return True
+
+    last_refresh = parse_utc_datetime(
+        get_state(
+            "last_refresh_at"
+        )
+    )
+
+    if last_refresh is None:
+        return True
+
+    age = (
+        datetime.now(timezone.utc)
+        - last_refresh
+    )
+
+    return age >= timedelta(
+        minutes=AUTO_REFRESH_MINUTES
     )
 
 
-@app.post("/api/refresh")
-def refresh():
-    """
-    Manually fetch recent Open-Meteo data and immediately run
-    the 24 XGBoost models.
-    """
+def perform_full_refresh():
+
     refresh_info = (
         refresh_openmeteo_and_aqi(
             past_days=BOOTSTRAP_PAST_DAYS
         )
     )
 
-    predictions = create_forecast()
+    predictions = (
+        create_forecast()
+    )
+
+    return {
+        "refresh":
+            refresh_info,
+
+        "forecast_count":
+            len(predictions),
+    }
+
+
+def ensure_data_ready(
+    force=False,
+):
+    """
+    Make the Render service self-healing.
+
+    - Empty SQLite after restart -> rebuild automatically.
+    - No saved forecast -> rebuild automatically.
+    - Data has not been refreshed for 60 minutes -> refresh.
+    - Concurrent dashboard requests -> only one refresh runs.
+    """
+
+    if (
+        not force
+        and
+        not refresh_is_due()
+    ):
+        return {
+            "refreshed": False,
+            "reason": "cached data is still fresh",
+        }
+
+    with refresh_lock:
+
+        # A second request may have waited for the first request to
+        # complete the refresh. Check again after acquiring the lock.
+        if (
+            not force
+            and
+            not refresh_is_due()
+        ):
+            return {
+                "refreshed": False,
+                "reason": "another request already refreshed the data",
+            }
+
+        try:
+
+            result = (
+                perform_full_refresh()
+            )
+
+            return {
+                "refreshed":
+                    True,
+
+                **result,
+            }
+
+        except Exception as error:
+
+            set_state(
+                "last_refresh_error",
+                str(error),
+            )
+
+            # If cached data still exists, allow the dashboard to
+            # continue using it even when Open-Meteo is temporarily
+            # unavailable.
+            if (
+                fetch_latest()
+                is not None
+                and
+                fetch_predictions()
+            ):
+                app.logger.exception(
+                    "Automatic refresh failed; serving cached data."
+                )
+
+                return {
+                    "refreshed":
+                        False,
+
+                    "warning":
+                        str(error),
+
+                    "reason":
+                        "automatic refresh failed; cached data served",
+                }
+
+            raise
+
+
+# ============================================================
+# FRIENDLY ROOT ROUTE
+# ============================================================
+
+@app.get("/")
+def home():
 
     return jsonify(
         {
-            "status": "ok",
-            "refresh": refresh_info,
-            "forecast_count": len(
-                predictions
-            ),
+            "service":
+                "Vadodara Open-Meteo AQI Forecast API",
+
+            "status":
+                "ok",
+
+            "model":
+                "XGBoost Delta 1-24 Hour Forecast",
+
+            "source":
+                "Open-Meteo CAMS Global",
+
+            "endpoints": {
+                "health":
+                    "/api/health",
+
+                "latest":
+                    "/api/latest",
+
+                "history":
+                    "/api/history?hours=168",
+
+                "forecast":
+                    "/api/forecast",
+
+                "model":
+                    "/api/model",
+
+                "refresh":
+                    "POST /api/refresh",
+            },
         }
     )
 
 
+# ============================================================
+# HEALTH
+# ============================================================
+
+@app.get("/api/health")
+def health():
+
+    latest = fetch_latest()
+
+    predictions = (
+        fetch_predictions()
+    )
+
+    return jsonify(
+        {
+            "status":
+                "ok",
+
+            "database_rows":
+                count_air_quality(),
+
+            "models_loaded":
+                len(
+                    forecast_service.models
+                ),
+
+            "expected_models":
+                24,
+
+            "forecast_rows":
+                len(predictions),
+
+            "latest_data_timestamp":
+                (
+                    latest[
+                        "timestamp"
+                    ]
+                    if latest
+                    else None
+                ),
+
+            "last_refresh_at":
+                get_state(
+                    "last_refresh_at"
+                ),
+
+            "last_refresh_error":
+                get_state(
+                    "last_refresh_error",
+                    "",
+                ),
+
+            "auto_refresh_minutes":
+                AUTO_REFRESH_MINUTES,
+        }
+    )
+
+
+# ============================================================
+# MANUAL FORCE REFRESH
+# ============================================================
+
+@app.post("/api/refresh")
+def refresh():
+
+    result = ensure_data_ready(
+        force=True
+    )
+
+    return jsonify(
+        {
+            "status":
+                "ok",
+
+            **result,
+        }
+    )
+
+
+# ============================================================
+# LATEST
+# ============================================================
+
 @app.get("/api/latest")
 def latest():
+
+    # Automatically rebuild/refresh if required.
+    ensure_data_ready()
+
     row = fetch_latest()
 
     if row is None:
         return jsonify(
             {
-                "error": "No air-quality data yet. Call POST /api/refresh."
+                "error":
+                    "Air-quality data is unavailable."
             }
-        ), 404
+        ), 503
 
-    return jsonify(row)
+    return jsonify(
+        row
+    )
 
+
+# ============================================================
+# HISTORY
+# ============================================================
 
 @app.get("/api/history")
 def history():
+
+    ensure_data_ready()
+
     try:
+
         hours = int(
             request.args.get(
                 "hours",
                 168,
             )
         )
+
     except ValueError:
+
         return jsonify(
             {
-                "error": "hours must be an integer"
+                "error":
+                    "hours must be an integer"
             }
         ), 400
 
     hours = max(
         1,
-        min(hours, 1000),
+        min(
+            hours,
+            1000,
+        ),
     )
 
     rows = fetch_air_quality(
@@ -156,25 +480,39 @@ def history():
 
     return jsonify(
         {
-            "hours_requested": hours,
-            "count": len(rows),
-            "data": rows,
+            "hours_requested":
+                hours,
+
+            "count":
+                len(rows),
+
+            "data":
+                rows,
         }
     )
 
 
+# ============================================================
+# FORECAST
+# ============================================================
+
 @app.get("/api/forecast")
 def forecast():
-    predictions = fetch_predictions()
+
+    # Automatically rebuild/refresh if required.
+    ensure_data_ready()
+
+    predictions = (
+        fetch_predictions()
+    )
 
     if not predictions:
         return jsonify(
             {
-                "error": (
-                    "No forecast yet. Call POST /api/refresh first."
-                )
+                "error":
+                    "Forecast is currently unavailable."
             }
-        ), 404
+        ), 503
 
     return jsonify(
         {
@@ -199,34 +537,54 @@ def forecast():
     )
 
 
+# ============================================================
+# MODEL INFO
+# ============================================================
+
 @app.get("/api/model")
 def model_info():
+
     return jsonify(
-        forecast_service.model_info()
+        forecast_service
+        .model_info()
     )
 
 
+# ============================================================
+# JSON ERROR HANDLER
+# ============================================================
+
 @app.errorhandler(Exception)
 def handle_exception(error):
-    app.logger.exception(error)
+
+    app.logger.exception(
+        error
+    )
 
     return jsonify(
         {
-            "error": str(error),
-            "type": error.__class__.__name__,
+            "error":
+                str(error),
+
+            "type":
+                error.__class__.__name__,
         }
     ), 500
 
 
+# ============================================================
+# LOCAL DEVELOPMENT
+# ============================================================
+
 if __name__ == "__main__":
+
     print(
         "Open-Meteo XGBoost backend starting..."
     )
+
     print(
-        "First run: open another terminal and execute:"
-    )
-    print(
-        "curl -X POST http://127.0.0.1:5000/api/refresh"
+        "The backend now refreshes automatically when data "
+        "is missing or older than 60 minutes."
     )
 
     app.run(

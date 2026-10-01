@@ -1,24 +1,40 @@
+from datetime import datetime, timezone
+
 import pandas as pd
 
 from aqi import calculate_aqi_dataframe
 from database import (
     fetch_air_quality,
+    fetch_latest,
     replace_aqi_values,
+    set_state,
     upsert_air_quality_rows,
 )
 from openmeteo import fetch_recent_hourly
 
 
-def refresh_openmeteo_and_aqi(past_days=30):
+def refresh_openmeteo_and_aqi(
+    past_days=30,
+):
     """
-    Refresh recent Open-Meteo data, store it, recalculate AQI,
-    and update the database.
+    Fetch recent Open-Meteo CAMS data, store/update it in SQLite,
+    calculate CPCB-style AQI and save the AQI values.
+
+    The database is intentionally rebuildable because Render's local
+    filesystem is not persistent across all restarts/redeploys.
     """
     rows = fetch_recent_hourly(
         past_days=past_days
     )
 
-    upsert_air_quality_rows(rows)
+    if not rows:
+        raise RuntimeError(
+            "Open-Meteo returned no hourly rows."
+        )
+
+    upsert_air_quality_rows(
+        rows
+    )
 
     db_rows = fetch_air_quality(
         limit=max(
@@ -32,10 +48,13 @@ def refresh_openmeteo_and_aqi(past_days=30):
             "Database is empty after Open-Meteo refresh."
         )
 
-    df = pd.DataFrame(db_rows)
+    df = pd.DataFrame(
+        db_rows
+    )
 
     df["timestamp"] = pd.to_datetime(
-        df["timestamp"]
+        df["timestamp"],
+        errors="coerce",
     )
 
     numeric_cols = [
@@ -53,8 +72,7 @@ def refresh_openmeteo_and_aqi(past_days=30):
             errors="coerce",
         )
 
-    # Runtime source is expected to be complete hourly data.
-    # Forward fill is causal and matches the deployment philosophy.
+    # Causal fill only.
     df[numeric_cols] = (
         df[numeric_cols]
         .ffill()
@@ -67,35 +85,71 @@ def refresh_openmeteo_and_aqi(past_days=30):
     pairs = []
 
     for _, row in aqi_df.iterrows():
-        if pd.isna(row["aqi"]):
+
+        if pd.isna(
+            row["aqi"]
+        ):
             aqi_value = None
         else:
-            aqi_value = float(row["aqi"])
+            aqi_value = float(
+                row["aqi"]
+            )
 
         pairs.append(
             (
-                row["timestamp"].isoformat(),
+                row[
+                    "timestamp"
+                ].isoformat(),
                 aqi_value,
             )
         )
 
-    replace_aqi_values(pairs)
+    replace_aqi_values(
+        pairs
+    )
+
+    latest_row = fetch_latest()
+
+    refresh_time = (
+        datetime.now(timezone.utc)
+        .isoformat()
+    )
+
+    set_state(
+        "last_refresh_at",
+        refresh_time,
+    )
+
+    set_state(
+        "last_refresh_error",
+        "",
+    )
 
     return {
-        "fetched_rows": len(rows),
-        "stored_rows_used_for_aqi": len(aqi_df),
-        "latest_timestamp": (
-            aqi_df["timestamp"]
-            .iloc[-1]
-            .isoformat()
-        ),
-        "latest_aqi": (
-            None
-            if pd.isna(
-                aqi_df["aqi"].iloc[-1]
-            )
-            else float(
-                aqi_df["aqi"].iloc[-1]
-            )
-        ),
+        "fetched_rows":
+            len(rows),
+
+        "stored_rows_used_for_aqi":
+            len(aqi_df),
+
+        "latest_timestamp":
+            (
+                latest_row[
+                    "timestamp"
+                ]
+                if latest_row
+                else None
+            ),
+
+        "latest_aqi":
+            (
+                latest_row[
+                    "aqi"
+                ]
+                if latest_row
+                else None
+            ),
+
+        "refreshed_at_utc":
+            refresh_time,
     }

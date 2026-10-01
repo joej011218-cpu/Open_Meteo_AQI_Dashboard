@@ -7,8 +7,14 @@ from config import DATA_DIR, DB_PATH
 @contextmanager
 def get_connection():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=30,
+    )
+
     conn.row_factory = sqlite3.Row
+
     try:
         yield conn
         conn.commit()
@@ -18,6 +24,7 @@ def get_connection():
 
 def init_db():
     with get_connection() as conn:
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS air_quality (
@@ -49,6 +56,18 @@ def init_db():
             """
         )
 
+        # Small key/value table used by the self-refreshing Render backend.
+        # This lets us remember the last successful refresh while the current
+        # Render instance is alive.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+            """
+        )
+
 
 def upsert_air_quality_rows(rows):
     if not rows:
@@ -58,9 +77,18 @@ def upsert_air_quality_rows(rows):
         conn.executemany(
             """
             INSERT INTO air_quality (
-                timestamp, pm25, pm10, no2, so2, co, o3, aqi, source
+                timestamp,
+                pm25,
+                pm10,
+                no2,
+                so2,
+                co,
+                o3,
+                aqi,
+                source
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+
             ON CONFLICT(timestamp) DO UPDATE SET
                 pm25=excluded.pm25,
                 pm10=excluded.pm10,
@@ -73,19 +101,23 @@ def upsert_air_quality_rows(rows):
             """,
             [
                 (
-                    r["timestamp"],
-                    r["pm25"],
-                    r["pm10"],
-                    r["no2"],
-                    r["so2"],
-                    r["co"],
-                    r["o3"],
-                    r.get("aqi"),
-                    r.get("source", "Open-Meteo CAMS Global"),
+                    row["timestamp"],
+                    row["pm25"],
+                    row["pm10"],
+                    row["no2"],
+                    row["so2"],
+                    row["co"],
+                    row["o3"],
+                    row.get("aqi"),
+                    row.get(
+                        "source",
+                        "Open-Meteo CAMS Global",
+                    ),
                 )
-                for r in rows
+                for row in rows
             ],
         )
+
     return len(rows)
 
 
@@ -95,8 +127,19 @@ def replace_aqi_values(timestamp_aqi_pairs):
 
     with get_connection() as conn:
         conn.executemany(
-            "UPDATE air_quality SET aqi=? WHERE timestamp=?",
-            [(aqi, timestamp) for timestamp, aqi in timestamp_aqi_pairs],
+            """
+            UPDATE air_quality
+            SET aqi=?
+            WHERE timestamp=?
+            """,
+            [
+                (
+                    aqi,
+                    timestamp,
+                )
+                for timestamp, aqi
+                in timestamp_aqi_pairs
+            ],
         )
 
 
@@ -104,49 +147,83 @@ def fetch_air_quality(limit=720):
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT timestamp, pm25, pm10, no2, so2, co, o3, aqi, source
+            SELECT
+                timestamp,
+                pm25,
+                pm10,
+                no2,
+                so2,
+                co,
+                o3,
+                aqi,
+                source
             FROM air_quality
             ORDER BY timestamp DESC
             LIMIT ?
             """,
-            (int(limit),),
+            (
+                int(limit),
+            ),
         ).fetchall()
 
-    # Return chronological order for feature generation.
-    return [dict(row) for row in reversed(rows)]
+    # Feature engineering requires chronological order.
+    return [
+        dict(row)
+        for row in reversed(rows)
+    ]
 
 
 def fetch_latest():
     with get_connection() as conn:
         row = conn.execute(
             """
-            SELECT timestamp, pm25, pm10, no2, so2, co, o3, aqi, source
+            SELECT
+                timestamp,
+                pm25,
+                pm10,
+                no2,
+                so2,
+                co,
+                o3,
+                aqi,
+                source
             FROM air_quality
             ORDER BY timestamp DESC
             LIMIT 1
             """
         ).fetchone()
 
-    return dict(row) if row else None
+    return (
+        dict(row)
+        if row
+        else None
+    )
 
 
 def count_air_quality():
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT COUNT(*) AS n FROM air_quality"
+            """
+            SELECT COUNT(*) AS n
+            FROM air_quality
+            """
         ).fetchone()
-    return int(row["n"])
+
+    return int(
+        row["n"]
+    )
 
 
 def save_predictions(predictions):
     if not predictions:
         return
 
-    generated_at = predictions[0]["generated_at"]
-
     with get_connection() as conn:
-        # Keep only the newest forecast run.
-        conn.execute("DELETE FROM predictions")
+
+        # Only the newest 1-24 hour forecast is needed by the dashboard.
+        conn.execute(
+            "DELETE FROM predictions"
+        )
 
         conn.executemany(
             """
@@ -163,15 +240,31 @@ def save_predictions(predictions):
             """,
             [
                 (
-                    p["generated_at"],
-                    p["forecast_time"],
-                    p["horizon"],
-                    p["current_aqi"],
-                    p["predicted_delta"],
-                    p["predicted_aqi"],
-                    p.get("model", "XGBoost_DeltaOnly"),
+                    prediction[
+                        "generated_at"
+                    ],
+                    prediction[
+                        "forecast_time"
+                    ],
+                    prediction[
+                        "horizon"
+                    ],
+                    prediction[
+                        "current_aqi"
+                    ],
+                    prediction[
+                        "predicted_delta"
+                    ],
+                    prediction[
+                        "predicted_aqi"
+                    ],
+                    prediction.get(
+                        "model",
+                        "XGBoost_DeltaOnly",
+                    ),
                 )
-                for p in predictions
+                for prediction
+                in predictions
             ],
         )
 
@@ -193,4 +286,55 @@ def fetch_predictions():
             """
         ).fetchall()
 
-    return [dict(row) for row in rows]
+    return [
+        dict(row)
+        for row in rows
+    ]
+
+
+def set_state(key, value):
+    """
+    Store a small runtime value.
+
+    Examples:
+        last_refresh_at
+        last_refresh_error
+    """
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO app_state (
+                key,
+                value
+            )
+            VALUES (?, ?)
+
+            ON CONFLICT(key) DO UPDATE SET
+                value=excluded.value
+            """,
+            (
+                str(key),
+                None
+                if value is None
+                else str(value),
+            ),
+        )
+
+
+def get_state(key, default=None):
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT value
+            FROM app_state
+            WHERE key=?
+            """,
+            (
+                str(key),
+            ),
+        ).fetchone()
+
+    if row is None:
+        return default
+
+    return row["value"]
