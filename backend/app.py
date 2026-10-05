@@ -29,8 +29,9 @@ init_db()
 forecast_service = XGBoostForecastService()
 refresh_lock = Lock()
 
-# Check for newer Open-Meteo data every 30 minutes.
-AUTO_REFRESH_MINUTES = 30
+# Open-Meteo CAMS data is hourly.
+# Refresh the source at most once per hour.
+AUTO_REFRESH_MINUTES = 60
 
 
 def aqi_category(aqi):
@@ -49,6 +50,7 @@ def aqi_category(aqi):
         return "Poor"
     if value <= 400:
         return "Very Poor"
+
     return "Severe"
 
 
@@ -97,6 +99,7 @@ def create_forecast():
     )
 
     save_predictions(predictions)
+
     return predictions
 
 
@@ -121,9 +124,18 @@ def parse_utc_datetime(value):
 
 
 def refresh_is_due():
+    """
+    Determine whether a new Open-Meteo refresh is required.
+
+    This is used ONLY by the refresh endpoint/automation.
+    Public dashboard endpoints do not call this function.
+    """
+
+    # Initial bootstrap requirement.
     if count_air_quality() < 200:
         return True
 
+    # We need a forecast before the dashboard is considered ready.
     if not fetch_predictions():
         return True
 
@@ -145,6 +157,11 @@ def refresh_is_due():
 
 
 def perform_full_refresh():
+    """
+    Fetch Open-Meteo data, update AQI values,
+    and generate the 24-hour XGBoost forecast.
+    """
+
     refresh_info = (
         refresh_openmeteo_and_aqi(
             past_days=BOOTSTRAP_PAST_DAYS
@@ -160,6 +177,17 @@ def perform_full_refresh():
 
 
 def ensure_data_ready(force=False):
+    """
+    Perform a controlled refresh.
+
+    force=False:
+        Refresh only when the cached data is stale.
+
+    force=True:
+        NOT used by the public refresh endpoint anymore.
+        Kept for compatibility if another internal caller uses it.
+    """
+
     if (
         not force
         and
@@ -171,6 +199,9 @@ def ensure_data_ready(force=False):
         }
 
     with refresh_lock:
+
+        # Another request may have refreshed the database
+        # while this request was waiting for the lock.
         if (
             not force
             and
@@ -178,7 +209,7 @@ def ensure_data_ready(force=False):
         ):
             return {
                 "refreshed": False,
-                "reason": "another request already refreshed the data",
+                "reason": "another refresh already completed",
             }
 
         try:
@@ -190,25 +221,31 @@ def ensure_data_ready(force=False):
             }
 
         except Exception as error:
+
             set_state(
                 "last_refresh_error",
                 str(error),
             )
 
-            # Keep serving stored data if Open-Meteo is temporarily unavailable.
+            # IMPORTANT:
+            # Keep the existing cached data available
+            # if Open-Meteo temporarily fails.
             if (
                 fetch_latest() is not None
                 and
                 fetch_predictions()
             ):
                 app.logger.exception(
-                    "Automatic refresh failed; serving cached data."
+                    "Refresh failed; serving cached data."
                 )
 
                 return {
                     "refreshed": False,
                     "warning": str(error),
-                    "reason": "automatic refresh failed; cached data served",
+                    "reason": (
+                        "refresh failed; "
+                        "cached data served"
+                    ),
                 }
 
             raise
@@ -268,7 +305,17 @@ def health():
 
 @app.post("/api/refresh")
 def refresh():
-    result = ensure_data_ready(force=True)
+    """
+    The ONLY public endpoint that can trigger
+    an Open-Meteo data refresh.
+
+    It does NOT force a refresh if the existing
+    data is still fresh.
+    """
+
+    result = ensure_data_ready(
+        force=False
+    )
 
     return jsonify(
         {
@@ -280,14 +327,23 @@ def refresh():
 
 @app.get("/api/latest")
 def latest():
-    ensure_data_ready()
+    """
+    READ-ONLY endpoint.
+
+    IMPORTANT:
+    This endpoint does NOT contact Open-Meteo.
+    Public dashboard visitors only read SQLite.
+    """
 
     row = fetch_latest()
 
     if row is None:
         return jsonify(
             {
-                "error": "Air-quality data is unavailable."
+                "error": (
+                    "Air-quality data is "
+                    "not available yet."
+                )
             }
         ), 503
 
@@ -300,7 +356,9 @@ def latest():
 
 @app.get("/api/history")
 def history():
-    ensure_data_ready()
+    """
+    READ-ONLY endpoint.
+    """
 
     try:
         hours = int(
@@ -309,6 +367,7 @@ def history():
                 168,
             )
         )
+
     except ValueError:
         return jsonify(
             {
@@ -341,7 +400,9 @@ def history():
 
 @app.get("/api/alerts")
 def alerts():
-    ensure_data_ready()
+    """
+    READ-ONLY endpoint.
+    """
 
     try:
         limit = int(
@@ -350,6 +411,7 @@ def alerts():
                 200,
             )
         )
+
     except ValueError:
         return jsonify(
             {
@@ -369,6 +431,7 @@ def alerts():
                 201,
             )
         )
+
     except ValueError:
         return jsonify(
             {
@@ -397,14 +460,21 @@ def alerts():
 
 @app.get("/api/forecast")
 def forecast():
-    ensure_data_ready()
+    """
+    READ-ONLY endpoint.
+
+    The prediction was generated during the scheduled
+    refresh and is simply read from SQLite here.
+    """
 
     predictions = fetch_predictions()
 
     if not predictions:
         return jsonify(
             {
-                "error": "Forecast is currently unavailable."
+                "error": (
+                    "Forecast is currently unavailable."
+                )
             }
         ), 503
 
