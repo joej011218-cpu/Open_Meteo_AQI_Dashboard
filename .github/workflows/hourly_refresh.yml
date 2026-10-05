@@ -3,7 +3,7 @@ name: Hourly AQI Refresh
 on:
   schedule:
     # Run at 5 minutes past every hour (UTC)
-    - cron: "5 * * * *"
+    - cron: "35 * * * *"
 
   # Also allows manual testing from GitHub
   workflow_dispatch:
