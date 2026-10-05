@@ -31,7 +31,7 @@ refresh_lock = Lock()
 
 # Open-Meteo CAMS data is hourly.
 # Refresh the source at most once per hour.
-AUTO_REFRESH_MINUTES = 60
+AUTO_REFRESH_MINUTES = 55
 
 
 def aqi_category(aqi):
