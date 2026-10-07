@@ -30,7 +30,7 @@
 
 
 
-<script src="https\://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
 
 
 
@@ -3170,22 +3170,11 @@ themeToggle.addEventListener(
 
 
 
-    if (latestPredictions.length) {
-
-
-
-      drawForecastChart(
-
-
-
-        latestPredictions
-
-
-
-      );
-
-
-
+    if (
+      latestPredictions.length
+      && typeof Chart !== "undefined"
+    ) {
+      drawForecastChart(latestPredictions);
     }
 
 
@@ -6819,86 +6808,41 @@ async function loadForecast() {
 
 
     displayForecastSummary(
-
-
-
       predictions
-
-
-
     );
-
-
-
-
-
-
 
     displayForecastTable(
-
-
-
       predictions
-
-
-
     );
 
-
-
-
-
-
-
-    drawForecastChart(
-
-
-
-      predictions
-
-
-
-    );
-
-
-
-
-
-
-
+    // Essential current AQI/pollutant data should not depend on Chart.js.
     displayCurrent(
-
-
-
       currentData
-
-
-
     );
 
+    // Chart.js is optional. Keep the rest of the dashboard working if
+    // the CDN/library cannot be loaded or chart rendering fails.
+    if (typeof Chart !== "undefined") {
+      try {
+        drawForecastChart(
+          predictions
+        );
+        chartWrapper.style.display = "block";
+      } catch (chartError) {
+        console.error(
+          "Forecast chart rendering failed:",
+          chartError
+        );
+        chartWrapper.style.display = "none";
+      }
+    } else {
+      console.warn(
+        "Chart.js is unavailable. Forecast data will still be displayed."
+      );
+      chartWrapper.style.display = "none";
+    }
 
-
-
-
-
-
-    loading.style.display =
-
-
-
-      "none";
-
-
-
-
-
-
-
-    chartWrapper.style.display =
-
-
-
-      "block";
+    loading.style.display = "none";
 
 
 
@@ -7015,26 +6959,8 @@ async function loadForecast() {
 
 
     errorBox.textContent =
-
-
-
-      "Unable to connect to "
-
-
-
-      + API_BASE
-
-
-
-      + ". "
-
-
-
-      + error.message
-
-
-
-      + " The forecast service may be temporarily unavailable.";
+      "Unable to load dashboard data. "
+      + error.message;
 
 
 
