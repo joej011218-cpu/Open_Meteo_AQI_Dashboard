@@ -511,16 +511,16 @@ def refresh():
             }
         ), 401
 
-    result = ensure_data_ready(
+    rresult = ensure_data_ready(
         force=False
     )
 
-    return jsonify(
-        {
-            "status": "ok",
-            **result,
-        }
-    )
+    return jsonify({
+        "status": "ok",
+        "refreshed": result.get("refreshed", False),
+        "reason": result.get("reason", "refresh completed"),
+    })
+      
 
 @app.get("/api/latest")
 
