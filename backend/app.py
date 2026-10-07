@@ -533,7 +533,7 @@ def refresh():
         # - XGBoost 24-hour prediction
         #
         ensure_data_ready(
-            force=False
+            force=True
         )
 
         # Keep cron-job.org response extremely small.
