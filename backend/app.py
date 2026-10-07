@@ -489,31 +489,25 @@ def refresh():
     """
     Protected endpoint used by the scheduled refresh job.
 
-    The endpoint does not force a refresh when the existing
-    Open-Meteo data is still fresh.
+    Refreshes Open-Meteo only when the existing cached data
+    is old enough according to AUTO_REFRESH_MINUTES.
     """
 
     supplied_secret = request.headers.get("X-Refresh-Secret", "")
 
     if not REFRESH_SECRET:
-        return jsonify(
-            {
-                "status": "error",
-                "error": "Refresh secret is not configured.",
-            }
-        ), 503
+        return jsonify({
+            "status": "error",
+            "error": "Refresh secret is not configured."
+        }), 503
 
     if supplied_secret != REFRESH_SECRET:
-        return jsonify(
-            {
-                "status": "error",
-                "error": "Unauthorized.",
-            }
-        ), 401
+        return jsonify({
+            "status": "error",
+            "error": "Unauthorized."
+        }), 401
 
-    rresult = ensure_data_ready(
-        force=False
-    )
+    result = ensure_data_ready(force=False)
 
     return jsonify({
         "status": "ok",
