@@ -487,35 +487,72 @@ def health():
 @app.post("/api/refresh")
 def refresh():
     """
-    Protected endpoint used by the scheduled refresh job.
+    Protected endpoint used by cron-job.org.
 
-    Refreshes Open-Meteo only when the existing cached data
-    is old enough according to AUTO_REFRESH_MINUTES.
+    Performs the scheduled Open-Meteo refresh when due,
+    but intentionally returns only a very small response
+    so cron-job.org does not reject the request because
+    of response size.
     """
 
-    supplied_secret = request.headers.get("X-Refresh-Secret", "")
+    supplied_secret = request.headers.get(
+        "X-Refresh-Secret",
+        ""
+    )
+
+    # ---------------------------------------------------------
+    # CHECK SERVER CONFIGURATION
+    # ---------------------------------------------------------
 
     if not REFRESH_SECRET:
         return jsonify({
-            "status": "error",
-            "error": "Refresh secret is not configured."
+            "status": "error"
         }), 503
+
+    # ---------------------------------------------------------
+    # CHECK CRON SECRET
+    # ---------------------------------------------------------
 
     if supplied_secret != REFRESH_SECRET:
         return jsonify({
-            "status": "error",
-            "error": "Unauthorized."
+            "status": "error"
         }), 401
 
-    result = ensure_data_ready(force=False)
+    # ---------------------------------------------------------
+    # PERFORM REFRESH
+    # ---------------------------------------------------------
 
-    return jsonify({
-        "status": "ok",
-        "refreshed": result.get("refreshed", False),
-        "reason": result.get("reason", "refresh completed"),
-    })
-      
+    try:
+        # IMPORTANT:
+        # Do not remove this call.
+        #
+        # ensure_data_ready() performs:
+        # - Open-Meteo refresh
+        # - PostgreSQL update
+        # - AQI calculation
+        # - XGBoost 24-hour prediction
+        #
+        ensure_data_ready(
+            force=False
+        )
 
+        # Keep cron-job.org response extremely small.
+        return jsonify({
+            "status": "ok"
+        }), 200
+
+    except Exception as error:
+
+        # Full error is written to Render logs instead
+        # of being returned to cron-job.org.
+        app.logger.exception(
+            "Scheduled refresh failed."
+        )
+
+        return jsonify({
+            "status": "error"
+        }), 500
+    
 @app.get("/api/latest")
 
 def latest():
