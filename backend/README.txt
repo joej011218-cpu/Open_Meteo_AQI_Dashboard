@@ -1,36 +1,49 @@
-AUTO-REFRESH BACKEND UPDATE
+Open-Meteo full dashboard integration
 
-Replace these files in your existing Open_Meteo/backend folder:
+This package connects:
+- Live page -> /api/latest
+- Analytics -> /api/history
+- Alerts -> /api/alerts
+- Prediction -> existing /api/forecast page
+
+BACKEND
+Replace these files in your Open_Meteo/backend folder:
 - app.py
 - database.py
 - service.py
 
-What changed:
-1. /api/latest and /api/forecast now automatically refresh when:
-   - SQLite is empty after a Render restart/redeploy,
-   - no forecast exists, or
-   - the last successful refresh is at least 60 minutes old.
+The backend now:
+1. Fetches Open-Meteo CAMS hourly pollutant values.
+2. Stores PM2.5, PM10, NO2, SO2, CO and O3 in SQLite.
+3. Calculates CPCB-style AQI using your existing aqi.py.
+4. Stores each calculated hourly AQI back into the air_quality table.
+5. Exposes /api/history for Analytics.
+6. Exposes /api/alerts for stored AQI >= 201.
+7. Auto-refreshes at most every 30 minutes when a dashboard API is requested.
 
-2. A Lock prevents the frontend's simultaneous /api/latest and /api/forecast
-   requests from launching duplicate Open-Meteo/XGBoost refreshes.
+DASHBOARD
+Replace:
+- dashboard/analytics.html
+- dashboard/alerts.html
 
-3. SQLite app_state records:
-   - last_refresh_at
-   - last_refresh_error
+The Live page can use the separately supplied Open-Meteo-connected index.html.
 
-4. If Open-Meteo temporarily fails but cached data exists, the backend serves
-   cached data instead of taking the dashboard offline.
-
-5. GET / now returns a friendly API description.
-
-DEPLOY:
+DEPLOY BACKEND
 cd ~/Open_Meteo
 git add backend/app.py backend/database.py backend/service.py
-git commit -m "Add automatic Open-Meteo refresh on Render"
+git commit -m "Connect analytics and alerts to stored Open Meteo AQI"
 git push
 
-After Render redeploys:
-https://YOUR-SERVICE.onrender.com/api/health
+After Render backend is Live, test:
+https://open-meteo-aqi-dashboard.onrender.com/api/history?hours=24
+https://open-meteo-aqi-dashboard.onrender.com/api/alerts?limit=200
 
-You no longer need to manually POST /api/refresh after a normal Render restart.
-The first /api/latest or /api/forecast request will rebuild the data automatically.
+DEPLOY PUBLIC DASHBOARD
+Copy analytics.html and alerts.html to:
+~/Documents/AIoT_Public_Dashboard/dashboard/
+
+Then:
+cd ~/Documents/AIoT_Public_Dashboard
+git add dashboard/analytics.html dashboard/alerts.html
+git commit -m "Connect analytics and alerts to Open Meteo backend"
+git push origin main
