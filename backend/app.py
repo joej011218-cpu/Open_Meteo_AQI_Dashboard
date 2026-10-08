@@ -2,7 +2,7 @@ from datetime import datetime, timezone, timedelta
 
 import os
 
-from threading import Lock
+from threading import Lock, Thread
 
 from flask import Flask, jsonify, request
 
@@ -484,74 +484,48 @@ def health():
 
     )
 
+def run_scheduled_refresh():
+    """
+    Run the complete refresh without keeping
+    the cron HTTP request open.
+    """
+    with app.app_context():
+        try:
+            app.logger.info("Scheduled AQI refresh started")
+
+            result = ensure_data_ready(force=False)
+
+            app.logger.info(
+                "Scheduled AQI refresh finished: %s",
+                result.get("refreshed", False)
+            )
+
+        except Exception:
+            app.logger.exception(
+                "Scheduled AQI refresh failed"
+            )
+
+
 @app.post("/api/refresh")
 def refresh():
-    """
-    Protected endpoint used by cron-job.org.
-
-    Performs the scheduled Open-Meteo refresh when due,
-    but intentionally returns only a very small response
-    so cron-job.org does not reject the request because
-    of response size.
-    """
-
     supplied_secret = request.headers.get(
-        "X-Refresh-Secret",
-        ""
+        "X-Refresh-Secret", ""
     )
 
-    # ---------------------------------------------------------
-    # CHECK SERVER CONFIGURATION
-    # ---------------------------------------------------------
-
     if not REFRESH_SECRET:
-        return jsonify({
-            "status": "error"
-        }), 503
-
-    # ---------------------------------------------------------
-    # CHECK CRON SECRET
-    # ---------------------------------------------------------
+        return jsonify({"status": "error"}), 503
 
     if supplied_secret != REFRESH_SECRET:
-        return jsonify({
-            "status": "error"
-        }), 401
+        return jsonify({"status": "error"}), 401
 
-    # ---------------------------------------------------------
-    # PERFORM REFRESH
-    # ---------------------------------------------------------
+    thread = Thread(
+        target=run_scheduled_refresh,
+        daemon=True
+    )
 
-    try:
-        # IMPORTANT:
-        # Do not remove this call.
-        #
-        # ensure_data_ready() performs:
-        # - Open-Meteo refresh
-        # - PostgreSQL update
-        # - AQI calculation
-        # - XGBoost 24-hour prediction
-        #
-        ensure_data_ready(
-            force=True
-        )
+    thread.start()
 
-        # Keep cron-job.org response extremely small.
-        return jsonify({
-            "status": "ok"
-        }), 200
-
-    except Exception as error:
-
-        # Full error is written to Render logs instead
-        # of being returned to cron-job.org.
-        app.logger.exception(
-            "Scheduled refresh failed."
-        )
-
-        return jsonify({
-            "status": "error"
-        }), 500
+    return "", 202
     
 @app.get("/api/latest")
 
