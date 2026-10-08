@@ -526,6 +526,10 @@ def refresh():
     thread.start()
 
     return "", 202
+
+@app.get("/api/cron-test")
+def cron_test():
+    return "", 204
     
 @app.get("/api/latest")
 
