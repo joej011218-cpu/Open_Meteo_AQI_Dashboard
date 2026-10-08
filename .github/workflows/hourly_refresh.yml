@@ -2,9 +2,7 @@ name: Hourly AQI Refresh
 
 on:
   schedule:
-    # Every hour at :20 UTC = :50 India time
     - cron: "20 * * * *"
-
   workflow_dispatch:
 
 permissions:
@@ -16,39 +14,21 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Trigger Open-Meteo AQI refresh
+      - name: Refresh Open-Meteo AQI forecast
         env:
           REFRESH_SECRET: ${{ secrets.REFRESH_SECRET }}
         run: |
           if [ -z "$REFRESH_SECRET" ]; then
-            echo "ERROR: REFRESH_SECRET is missing."
+            echo "ERROR: REFRESH_SECRET is not configured."
             exit 1
           fi
 
-          for attempt in 1 2 3; do
-            echo "Refresh attempt: $attempt"
+          curl --fail --show-error --silent \
+            --retry 3 \
+            --retry-delay 15 \
+            --max-time 120 \
+            --request POST \
+            --header "X-Refresh-Secret: $REFRESH_SECRET" \
+            "https://open-meteo-aqi-dashboard.onrender.com/api/refresh"
 
-            status=$(curl \
-              --silent \
-              --show-error \
-              --location \
-              --max-time 120 \
-              --output /dev/null \
-              --write-out "%{http_code}" \
-              --request POST \
-              --header "X-Refresh-Secret: $REFRESH_SECRET" \
-              "https://open-meteo-aqi-dashboard.onrender.com/api/refresh") || status="000"
-
-            echo "HTTP status: $status"
-
-            if [ "$status" = "200" ] || [ "$status" = "202" ]; then
-              echo "Refresh request accepted."
-              exit 0
-            fi
-
-            echo "Request failed. Retrying in 30 seconds..."
-            sleep 30
-          done
-
-          echo "All refresh attempts failed."
-          exit 1
+          echo "Refresh request accepted."
