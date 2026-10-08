@@ -2,7 +2,9 @@ name: Hourly AQI Refresh
 
 on:
   schedule:
-    - cron: "45 * * * *"
+    - cron: "15 * * * *"
+      timezone: "Asia/Kolkata"
+
   workflow_dispatch:
 
 permissions:
